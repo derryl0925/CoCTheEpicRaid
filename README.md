@@ -35,4 +35,4 @@ Clone or download this repo, then open `index.html` in a browser (double-click i
 
 ## License
 
-The source code is under the [MIT License](LICENSE). That covers only the code in this repo. *Clash of Clans* names and trademarks belong to Supercell Oy, and *The Epic Raid* board game belongs to its designers and Maestro Media. The repo contains no official artwork (the visuals are emoji) and no copy of the rulebook. This is a non-commercial fan project.
+The source code is under the [MIT License](LICENSE). That covers only the code in this repo; see [NOTICE](NOTICE). *Clash of Clans* names and trademarks belong to Supercell Oy, and *The Epic Raid* board game belongs to its designers and Maestro Media. The repo contains no official artwork (the visuals are emoji) and no copy of the rulebook. This is a non-commercial fan project.
