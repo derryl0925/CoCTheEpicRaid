@@ -1,0 +1,5 @@
+# Official rulebook (copyrighted by Supercell / Maestro Media) - keep local only
+*.pdf
+
+.DS_Store
+node_modules/
