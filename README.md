@@ -6,7 +6,9 @@ A browser version of *Clash of Clans: The Epic Raid* (Eric M. Lang & Ken Gruhl, 
 
 ## Play
 
-Clone or download this repo, then open `index.html` in a browser (double-click it). There's no server and no install. The game autosaves to the browser, and **Resume** on the start screen picks up where you left off.
+**▶ Play in your browser: https://derryl0925.github.io/CoCTheEpicRaid/**
+
+Or play offline: clone or download this repo, then open `index.html` in a browser (double-click it). There's no server and no install. The game autosaves to your browser, and **Resume** on the start screen picks up where you left off.
 
 ## Files
 
