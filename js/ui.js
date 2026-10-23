@@ -21,6 +21,9 @@
     speed: 700,
     aiTimer: null,
     lastCurrent: null,
+    guideOpen: localStorage.getItem('epicraid-guide') !== 'closed',
+    logSeen: null,
+    combatSeen: null,
   };
 
   // ---------- utils ----------
@@ -51,6 +54,7 @@
     }
     if (a.type === 'deploy' || a.type === 'skipFollowup') {
       ui.raid.count = 1;
+      if (ui.raid.unit && !E.unusedUnits(me(), ui.raid.unit).length) ui.raid = { unit: null, count: 1, mode: 'building', wallbreak: false };
     }
     if (!G.pending || G.pending.kind !== 'raid') ui.raid = { unit: null, count: 1, mode: 'building', wallbreak: false };
     ui.modal = G.gameOver ? { kind: 'gameover' } : ui.modal;
@@ -144,6 +148,10 @@
       case 'close':
         ui.modal = null;
         return render();
+      case 'guide':
+        ui.guideOpen = !ui.guideOpen;
+        localStorage.setItem('epicraid-guide', ui.guideOpen ? 'open' : 'closed');
+        return render();
       case 'focus':
         ui.focus = a;
         return render();
@@ -210,11 +218,21 @@
 
   // ---------- rendering ----------
   function render() {
+    // Keep scroll positions across full re-renders so the page doesn't jump.
+    const scroll = {};
+    document.querySelectorAll('[data-scroll]').forEach((el) => (scroll[el.dataset.scroll] = [el.scrollTop, el.scrollLeft]));
     if (ui.view === 'setup') app.innerHTML = setupView();
     else app.innerHTML = gameView();
     if (ui.modal) app.insertAdjacentHTML('beforeend', modalView());
+    document.querySelectorAll('[data-scroll]').forEach((el) => {
+      const s = scroll[el.dataset.scroll];
+      if (s) [el.scrollTop, el.scrollLeft] = s;
+    });
     const log = document.querySelector('.log');
-    if (log) log.scrollTop = log.scrollHeight;
+    if (log && G && G.log.length !== ui.logSeen) {
+      log.scrollTop = log.scrollHeight;
+      ui.logSeen = G.log.length;
+    }
     scheduleAI();
   }
 
@@ -231,7 +249,7 @@
       </div>`).join('');
     return `
     <div class="setup">
-      <div class="title">CLASH OF CLANS</div>
+      <div class="title">⚔️ CLASH OF CLANS</div>
       <div class="subtitle">THE EPIC RAID · FAN-MADE DIGITAL EDITION</div>
       <p>Build your village, train troops and raid your rivals. First to <b>40★</b> triggers the end of the game. Pass-and-play on one screen. Any seat can be a computer player.</p>
       <div class="row"><label><b>Players</b></label>
@@ -286,38 +304,162 @@
     }
     if (!p.isAI && !pend && p.masterLeft > 0) extra += `<button class="${ui.useMaster ? '' : 'secondary'}" data-cmd="master">${ui.useMaster ? '✔ Using' : 'Use'} Master Builder</button>`;
     return `
-    <div class="game">
+    <div class="game ${ui.guideOpen ? '' : 'guide-closed'}">
       <div class="topbar">
-        <span class="round">Round ${G.round}</span>
-        <span class="turn-pill" style="background:${p.color}">${esc(p.name)}'s turn</span>
-        <span class="prompt">${promptText()}</span>
-        ${extra}
-        <label class="note">AI speed <select id="speed">
-          ${[[1500, 'Slow'], [700, 'Normal'], [250, 'Fast'], [30, 'Instant']].map(([v, l]) => `<option value="${v}" ${ui.speed === v ? 'selected' : ''}>${l}</option>`).join('')}
-        </select></label>
-        <button class="secondary small" data-cmd="rules">Rules</button>
-        <button class="secondary small" data-cmd="menu">Menu</button>
+        <div class="topbar-left">
+          <span class="round">Round ${G.round}</span>
+          ${phaseStepper()}
+        </div>
+        <div class="topbar-mid">
+          <span class="turn-pill" style="--pc:${p.color}">${p.isAI ? '🤖 ' : ''}${esc(p.name)}'s turn</span>
+          <span class="prompt">${promptText()}</span>
+          ${extra}
+        </div>
+        <div class="topbar-right">
+          <label class="speed">AI speed <select id="speed">
+            ${[[1500, 'Slow'], [700, 'Normal'], [250, 'Fast'], [30, 'Instant']].map(([v, l]) => `<option value="${v}" ${ui.speed === v ? 'selected' : ''}>${l}</option>`).join('')}
+          </select></label>
+          <button class="ghost small" data-cmd="rules">📖 Rules</button>
+          <button class="ghost small" data-cmd="menu">☰ Menu</button>
+        </div>
       </div>
-      <div class="col">
+      <div class="col" data-scroll="left">
         ${trackView()}
         ${boardView()}
         ${logView()}
       </div>
-      <div class="col">
+      <div class="col" data-scroll="mid">
         ${playersView()}
         ${villagePanel()}
       </div>
+      ${guideView()}
     </div>`;
   }
 
+  // ---------- phase stepper + turn guide ----------
+  const PHASES = [
+    { id: 'collect', label: 'Collect', icon: '💰' },
+    { id: 'builder', label: 'Builders', icon: '🔨' },
+    { id: 'score', label: 'Score', icon: '⭐' },
+    { id: 'remove', label: 'Remove', icon: '🧯' },
+    { id: 'discount', label: 'Discount', icon: '🏷️' },
+  ];
+  function phaseStepper() {
+    const curIdx = G.gameOver ? PHASES.length : 1; // collect/score/remove/discount resolve automatically
+    return `<ol class="phases">${PHASES.map((ph, i) =>
+      `<li class="${i < curIdx ? 'done' : i === curIdx ? 'now' : ''}" title="${ph.label}${i === 1 ? '' : ' (automatic)'}"><span>${ph.icon}</span>${ph.label}</li>`).join('')}</ol>`;
+  }
+
+  // Why an action can't be taken right now (null = it can).
+  function whyNot(action) {
+    const p = me();
+    const spaces = DATA.SPACES.filter((s) => s.action === action && s.min <= G.players.length);
+    const open = spaces.some((s) => !G.spaces[s.id].length && p.buildersLeft > 0) ||
+      (p.masterLeft > 0 && spaces.some((s) => !(s.id === 'first' && G.spaces[s.id].length)));
+    if (!open) return 'all spaces taken';
+    switch (action) {
+      case 'collector': return E.canPay(p, 'gold', 1) ? null : 'needs 1 gold';
+      case 'build': return [0, 1, 2].some((c) => actionAvailable('build', c)) ? null : 'can’t afford any open tile';
+      case 'upgrade':
+        if (p.thLevel >= 5) return 'Town Hall is max level';
+        return E.canPay(p, 'elixir', DATA.TOWNHALL[p.thLevel + 1].cost) ? null : `needs ${DATA.TOWNHALL[p.thLevel + 1].cost} elixir`;
+      case 'epic':
+      case 'raid': return E.unusedUnits(p).length ? null : 'no units ready';
+    }
+    return null;
+  }
+
+  function guideView() {
+    if (!ui.guideOpen) return `<button class="guide-tab" data-cmd="guide" title="Show turn guide">📜 Guide</button>`;
+    const p = me();
+    const pend = G.pending;
+    let now;
+    if (G.gameOver) {
+      now = `<p>The game is over. Open <b>☰ Menu</b> to start a new one.</p>`;
+    } else if (p.isAI) {
+      now = `<p class="waiting"><span class="spinner"></span> ${esc(p.name)} is taking a turn. Watch the log and the village view to see what they do.</p>`;
+    } else if (!pend) {
+      const acts = [
+        ['build', '🏗️', 'Build a tile', 'Buy a building or unit from the build area (click a card).'],
+        ['collector', '⛏️', 'Collectors', 'Gold or Elixir Collector, 1 gold.'],
+        ['upgrade', '🏰', 'Upgrade Town Hall', 'Pay elixir; +1★ per round and a reward.'],
+        ['defense', '🛡️', 'Defenses', '1 battery + 2 walls.'],
+        ['epic', '⚔️', 'Epic Raid', '+1 gold/elixir, then raid a rival.'],
+        ['raid', '🗡️', 'Raid', 'Raid a rival (no bonus).'],
+        ['first', '🚩', 'Take 1st Player', '+1 gem, go first next round.'],
+      ];
+      const items = acts.map(([id, icon, name, desc]) => {
+        const why = whyNot(id);
+        return `<li class="${why ? 'no' : 'yes'}"><span class="gi">${icon}</span><div><b>${name}</b><span>${why ? '✗ ' + why : desc}</span></div></li>`;
+      }).join('');
+      now = `<p><b>Place 1 builder</b> on any open action, <b>in any order you like</b>. You have
+        <b>${p.buildersLeft}</b> builder${p.buildersLeft === 1 ? '' : 's'}${p.masterLeft ? ' + your ⭐ Master Builder' : ''} left this round.</p>
+        <ul class="acts">${items}</ul>
+        <p class="tip">💡 Raid before the Score phase: anything you burn won't score for its owner this round.</p>`;
+    } else if (pend.kind === 'placeBuilding') {
+      now = steps(['Pay for the tile ✓', `Click a <b>highlighted spot</b> next to your village to place your ${DATA.BUILDINGS[pend.tile].name}`], 1) +
+        `<p class="tip">💡 Tiles touching more of your village are easier to protect with batteries in shared corners.</p>`;
+    } else if (pend.kind === 'placeDefense') {
+      const list = [];
+      if (pend.battery) list.push(`Place the ${DATA.DEFENSES[pend.battery].name} on a <b>highlighted corner</b>`);
+      if (pend.walls) list.push(`Place walls on <b>highlighted edges</b> (${pend.walls} left), or skip`);
+      now = steps(list, 0) +
+        `<p class="tip">💡 A battery fires at anything attacking a tile or wall it touches. Walls block the edge they sit on.</p>`;
+    } else if (pend.kind === 'raid') {
+      const fu = G.raid.followup;
+      const d = G.players[G.raid.defender];
+      if (fu) {
+        now = `<p><b>${DATA.UNITS[fu.unit].name}</b> survived and can attack again. Click a highlighted target in ${esc(d.name)}'s village, or skip the extra attack.</p>`;
+      } else {
+        const stage = !ui.raid.unit ? 0 : 2;
+        now = steps([
+          'Pick a <b>unit type</b> from the raid bar',
+          'Choose <b>how many</b> to send (+/−)',
+          'Click a <b>glowing target</b>: a tile, a wall, or (Archers) a battery',
+          'Batteries touching it roll black dice first; survivors roll red dice',
+          'Repeat with other units, or <b>End raid</b>',
+        ], stage) +
+        `<p class="tip">💡 Burning something gives you 1★. Burning a collector also gives you its resource. Your surviving units expose the tiles next to them for your next wave.</p>`;
+      }
+    }
+    return `<aside class="guide panel" data-scroll="guide">
+      <div class="guide-head"><h3>📜 Turn guide</h3><button class="ghost small" data-cmd="guide" title="Hide guide">✕</button></div>
+      <section>
+        <h4>Every round, in this order</h4>
+        <ol class="round-order">
+          <li class="done"><b>Collect</b><span>Collectors, mines and storages pay out <i>(automatic)</i></span></li>
+          <li class="${G.gameOver ? 'done' : 'now'}"><b>Builder actions</b><span>Players take turns placing 1 builder each until all are placed</span></li>
+          <li><b>Score village</b><span>Town Hall ★ per level + scoring buildings, unless burned <i>(automatic)</i></span></li>
+          <li><b>Remove</b><span>Fires go out, units go home <i>(automatic)</i></span></li>
+          <li><b>Discount &amp; refill</b><span>Unbought tiles get cheaper; empty spots refill <i>(automatic)</i></span></li>
+        </ol>
+        <p class="note">Game ends at the end of a round where someone has ${DATA.WIN_STARS}★.</p>
+      </section>
+      <section class="now-box" style="--pc:${p.color}">
+        <h4>Right now: ${esc(p.name)}</h4>
+        ${now}
+      </section>
+      <details class="ref">
+        <summary>Quick reference</summary>
+        <p><b>Dice:</b> <span class="die red">⚔</span> 1 damage · <span class="die red">⚔⚔</span> 2 · <span class="die red">⚔+</span> 1 + roll another die · <span class="die black">⚔</span> defense hit.</p>
+        <p><b>Exposed target:</b> it has an edge with no wall that faces empty ground, a burned tile, or one of your standing units. Flyers 🎈🐉 ignore walls.</p>
+        <p><b>Damage:</b> a unit dies if the defense damage reaches its 🛡. Nothing carries over between attacks.</p>
+        <p><b>Resources:</b> 🪙 gold buys buildings and defenses · 🧪 elixir buys units and upgrades · 💎 gems count as either.</p>
+      </details>
+    </aside>`;
+  }
+  function steps(list, current) {
+    return `<ol class="steps">${list.map((s, i) => `<li class="${i < current ? 'done' : i === current ? 'now' : ''}">${s}</li>`).join('')}</ol>`;
+  }
+
   function trackView() {
-    const rows = G.players.map((p) => `
-      <div class="track-row">
-        <span style="color:${p.color}">${esc(p.name)}${G.firstPlayer === p.id ? ' 🚩' : ''}</span>
-        <div class="track-bar"><div style="width:${Math.min(100, (p.stars / DATA.WIN_STARS) * 100)}%;background:${p.color}"></div></div>
-        <span>${p.stars}★</span>
+    const rows = [...G.players].sort((x, y) => y.stars - x.stars).map((p) => `
+      <div class="track-row ${p.id === G.current ? 'is-turn' : ''}">
+        <span class="tname" style="color:${p.color}">${esc(p.name)}${G.firstPlayer === p.id ? ' <span title="First player">🚩</span>' : ''}</span>
+        <div class="track-bar"><div style="width:${Math.min(100, (p.stars / DATA.WIN_STARS) * 100)}%;--pc:${p.color}"></div></div>
+        <span class="tstars">${p.stars}★</span>
       </div>`).join('');
-    return `<div class="panel"><h3>Victory stars (first to ${DATA.WIN_STARS})</h3><div class="track">${rows}</div></div>`;
+    return `<div class="panel"><h3>⭐ Victory stars <span class="note">first to ${DATA.WIN_STARS}</span></h3><div class="track">${rows}</div></div>`;
   }
 
   function slotsView(action) {
@@ -352,42 +494,30 @@
       return `<button class="small" ${ok ? '' : 'disabled'} data-cmd="collector" data-arg="${arg(res)}">${b.icon} ${b.name} (1🪙) ×${G.collectors[id]}</button>`;
     };
 
+    const box = (action, color, icon, title, desc, btns, wide) => {
+      const open = human && !whyNot(action);
+      return `<div class="action ${color} ${open ? 'is-open' : ''}" ${wide ? 'style="grid-column: span 2"' : ''}>
+        <div class="ahead"><span class="aicon">${icon}</span><span class="name">${title}</span>${slotsView(action)}</div>
+        <span class="desc">${desc}</span>
+        <div class="btns">${btns}</div>
+      </div>`;
+    };
     return `
     <div class="panel">
-      <h3>Center board</h3>
+      <h3>🗺️ Center board</h3>
       <div class="actions">
-        <div class="action green">
-          <span class="name">Collectors</span>${slotsView('collector')}
-          <span class="desc">Build a collector (1 gold) next to your village.</span>
-          <div class="btns">${colBtn('gold')}${colBtn('elixir')}</div>
-        </div>
-        <div class="action red">
-          <span class="name">Upgrade Town Hall</span>${slotsView('upgrade')}
-          <span class="desc">${nextTH ? `To level ${p.thLevel + 1}: ${nextTH.cost} elixir. ${nextTH.text}.` : 'Town Hall is max level.'}</span>
-          <div class="btns"><button class="small" ${can('upgrade') ? '' : 'disabled'} data-cmd="upgrade">Upgrade</button></div>
-        </div>
-        <div class="action red">
-          <span class="name">Take 1st Player</span>${slotsView('first')}
-          <span class="desc">+1 gem. You go first next round.</span>
-          <div class="btns"><button class="small" ${can('first') ? '' : 'disabled'} data-cmd="first">Take</button></div>
-        </div>
-        <div class="action red">
-          <span class="name">Epic Raid</span>${slotsView('epic')}
-          <span class="desc">Bonus +1 gold or elixir, then raid one rival.</span>
-          <div class="btns"><button class="small" ${can('epic') ? '' : 'disabled'} data-cmd="raidMenu" data-arg="${arg('epic')}">Epic Raid</button></div>
-        </div>
-        <div class="action red">
-          <span class="name">Raid</span>${slotsView('raid')}
-          <span class="desc">Raid one rival (no bonus).</span>
-          <div class="btns"><button class="small" ${can('raid') ? '' : 'disabled'} data-cmd="raidMenu" data-arg="${arg('raid')}">Raid</button></div>
-        </div>
-        <div class="action yellow" style="grid-column: span 2">
-          <span class="name">Defenses</span>${slotsView('defense')}
-          <span class="desc">Build 1 defense battery and always get 2 walls. Walls left: ${G.wallSupply}</span>
-          <div class="btns">${defBtns}</div>
-        </div>
+        ${box('collector', 'green', '⛏️', 'Collectors', 'Build a collector (1 gold) next to your village.', colBtn('gold') + colBtn('elixir'))}
+        ${box('upgrade', 'red', '🏰', 'Upgrade Town Hall', nextTH ? `To level ${p.thLevel + 1}: <b>${nextTH.cost} elixir</b>. ${nextTH.text}.` : 'Town Hall is max level.',
+          `<button class="small" ${can('upgrade') ? '' : 'disabled'} data-cmd="upgrade">Upgrade</button>`)}
+        ${box('first', 'red', '🚩', 'Take 1st Player', '+1 gem. You go first next round.',
+          `<button class="small" ${can('first') ? '' : 'disabled'} data-cmd="first">Take</button>`)}
+        ${box('epic', 'red', '⚔️', 'Epic Raid', 'Bonus +1 gold or elixir, then raid one rival.',
+          `<button class="small" ${can('epic') ? '' : 'disabled'} data-cmd="raidMenu" data-arg="${arg('epic')}">Epic Raid</button>`)}
+        ${box('raid', 'red', '🗡️', 'Raid', 'Raid one rival (no bonus).',
+          `<button class="small" ${can('raid') ? '' : 'disabled'} data-cmd="raidMenu" data-arg="${arg('raid')}">Raid</button>`)}
+        ${box('defense', 'yellow', '🛡️', 'Defenses', `Build 1 defense battery and always get 2 walls. Walls left: ${G.wallSupply}`, defBtns, true)}
       </div>
-      <h3 style="margin-top:10px">Build area <span class="note">(deck: ${G.deck.length})</span></h3>
+      <h3 style="margin-top:12px">🏗️ Build area <span class="note">deck: ${G.deck.length} tiles</span></h3>
       <div class="build-area">${cols}</div>
     </div>`;
   }
@@ -470,7 +600,7 @@
     return `<div class="panel village-wrap" style="flex:1">
       <div class="tabs">${tabs}</div>
       ${header}
-      <div class="village">${villageSVG(G.players[shown], hl)}</div>
+      <div class="village" data-scroll="village">${villageSVG(G.players[shown], hl)}</div>
       ${combatView()}
       <div class="note" style="margin-top:4px">Shield = defense. Batteries sit in tile corners and roll 1 black die against attackers on any tile/wall they touch. 🔥 = burned this round (doesn't score).</div>
     </div>`;
@@ -508,20 +638,30 @@
       ? c.defense.map((d) => `${DATA.DEFENSES[d.battery].icon} ${diceView(d.faces, 'black')}`).join(' ')
       : '<span class="note">no defenses could fire</span>';
     const atk = c.attack ? `${diceView(c.attack.faces, 'red')} = <b>${c.attack.dmg}</b> dmg` : '<span class="note">none survived</span>';
-    return `<div class="combat"><b>${esc(G.players[c.attacker].name)}: ${c.count}× ${u.icon} ${u.name}${c.followup ? ' (extra attack)' : ''}</b><br>
-      Defense: ${defs} → ${c.defenseTotal} dmg, ${c.killed} defeated<br>
-      Attack: ${atk}${c.burned.length ? `<br>🔥 Burned: <b>${esc(c.burned.join(', '))}</b> (+${c.burned.length}★)` : ''}</div>`;
+    const fresh = ui.combatSeen !== c.summary;
+    ui.combatSeen = c.summary;
+    return `<div class="combat ${fresh ? 'fresh' : ''}" style="--pc:${G.players[c.attacker].color}">
+      <div class="chead"><b>${esc(G.players[c.attacker].name)}</b> sent ${c.count}× ${u.icon} ${u.name}${c.followup ? ' <i>(extra attack)</i>' : ''}</div>
+      <div class="crow"><span class="clabel">🛡 Defense</span> ${defs} <span class="cres">${c.defenseTotal} dmg · ${c.killed} defeated</span></div>
+      <div class="crow"><span class="clabel">⚔ Attack</span> ${atk}</div>
+      ${c.burned.length ? `<div class="crow burn">🔥 Burned <b>${esc(c.burned.join(', '))}</b> <span class="gain">+${c.burned.length}★</span></div>` : `<div class="crow miss">${c.attack ? 'Not enough damage. Nothing burned.' : ''}</div>`}
+    </div>`;
   }
 
   function logView() {
-    return `<div class="panel"><h3>Log</h3><div class="log">${G.log.slice(-120).map((l) => `<div>${esc(l)}</div>`).join('')}</div></div>`;
+    const start = G.log.length - Math.min(120, G.log.length);
+    const lines = G.log.slice(start).map((l, i) => {
+      const fresh = ui.logSeen != null && start + i >= ui.logSeen;
+      const cls = l.startsWith('—') ? 'round' : /burned/.test(l) ? 'burn' : /scores/.test(l) ? 'score' : '';
+      return `<div class="${cls} ${fresh ? 'fresh' : ''}">${esc(l)}</div>`;
+    }).join('');
+    return `<div class="panel"><h3>📜 Log</h3><div class="log" data-scroll="log">${lines}</div></div>`;
   }
 
   // ---------- village SVG ----------
   const C = 84; // cell size
   const CUT = 17; // corner cut for batteries
   const M = 24;
-  const TILE_COLORS = { townhall: '#2f5f2a', goldCollector: '#86b65a', elixirCollector: '#86b65a' };
 
   function villageSVG(p, hl) {
     const v = p.village;
@@ -547,15 +687,16 @@
       const b = DATA.BUILDINGS[t.id];
       const burned = v.burned['c:' + k];
       const x0 = X(x) + 2, y0 = Y(y) + 2, x1 = X(x + 1) - 2, y1 = Y(y + 1) - 2;
-      const fill = burned ? '#5b3a22' : TILE_COLORS[t.id] || (b.score ? '#3d7230' : '#6fa548');
+      const fill = burned ? 'url(#g-burn)' : t.id === 'townhall' ? 'url(#g-th)' : b.score ? 'url(#g-score)' : 'url(#g-grass)';
       const def = E.tileDefense(p, k);
       const name = t.id === 'townhall' ? `Town Hall L${p.thLevel}` : b.name;
-      out.push(`<g><title>${esc(name)} — defense ${def}. ${esc(b.text)}</title>
-        <polygon class="tile" points="${oct(x0, y0, x1, y1, CUT - 2)}" fill="${fill}"/>
-        <text class="tile-icon" x="${(x0 + x1) / 2}" y="${(y0 + y1) / 2 - 6}">${burned ? '🔥' : b.icon}</text>
+      out.push(`<g class="vtile ${burned ? 'is-burned' : ''}"><title>${esc(name)} — defense ${def}. ${esc(b.text)}</title>
+        <polygon class="tile" points="${oct(x0, y0, x1, y1, CUT - 2)}" fill="${fill}" filter="url(#f-shadow)"/>
+        <polygon class="tile-shine" points="${oct(x0 + 4, y0 + 4, x1 - 4, y1 - 4, CUT - 5)}"/>
+        <text class="tile-icon ${burned ? 'fire' : ''}" x="${(x0 + x1) / 2}" y="${(y0 + y1) / 2 - 6}">${burned ? '🔥' : b.icon}</text>
         <text class="tile-label" x="${(x0 + x1) / 2}" y="${y1 - 10}">${esc(name)}</text>
-        <circle cx="${x1 - 14}" cy="${y0 + 14}" r="9" fill="#7d8790" stroke="#333"/>
-        <text class="shield" x="${x1 - 14}" y="${y0 + 14}">${def}</text></g>`);
+        <path d="M${x1 - 22},${y0 + 6} h16 v8 q0,9 -8,13 q-8,-4 -8,-13 z" fill="url(#g-shield)" stroke="#2c3238" stroke-width="1.2"/>
+        <text class="shield" x="${x1 - 14}" y="${y0 + 15}">${def}</text></g>`);
     }
     // walls
     for (const e in v.walls) out.push(wallLine(e, X, Y, v.burned['w:' + e] ? 'wall burned' : 'wall'));
@@ -566,8 +707,9 @@
       const b = v.batteries[vt];
       const burned = v.burned['b:' + vt];
       out.push(`<g><title>${DATA.DEFENSES[b].name}. ${esc(DATA.DEFENSES[b].text)}</title>
-        <circle class="battery" cx="${X(x)}" cy="${Y(y)}" r="14" fill="${burned ? '#5b3a22' : BCOL[b]}"/>
-        <text class="tile-icon" style="font-size:15px" x="${X(x)}" y="${Y(y)}">${burned ? '🔥' : DATA.DEFENSES[b].icon}</text></g>`);
+        <circle class="battery" cx="${X(x)}" cy="${Y(y)}" r="15" fill="${burned ? '#5b3a22' : BCOL[b]}" filter="url(#f-shadow)"/>
+        <circle cx="${X(x)}" cy="${Y(y)}" r="11" fill="none" stroke="rgba(255,255,255,.35)" stroke-width="1.5"/>
+        <text class="tile-icon ${burned ? 'fire' : ''}" style="font-size:15px" x="${X(x)}" y="${Y(y)}">${burned ? '🔥' : DATA.DEFENSES[b].icon}</text></g>`);
     }
     // attackers standing / fallen
     const byCell = {};
@@ -607,7 +749,15 @@
         }
       }
     }
-    return `<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">${out.join('')}</svg>`;
+    const defs = `<defs>
+      <linearGradient id="g-grass" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#9fd06a"/><stop offset="1" stop-color="#5f9a3a"/></linearGradient>
+      <linearGradient id="g-score" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#5a9a45"/><stop offset="1" stop-color="#2f6326"/></linearGradient>
+      <linearGradient id="g-th" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#8a7a5a"/><stop offset="1" stop-color="#4f4430"/></linearGradient>
+      <linearGradient id="g-burn" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#6b3a1e"/><stop offset="1" stop-color="#2e1a0f"/></linearGradient>
+      <linearGradient id="g-shield" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#c9d1d8"/><stop offset="1" stop-color="#6c7882"/></linearGradient>
+      <filter id="f-shadow" x="-20%" y="-20%" width="140%" height="150%"><feDropShadow dx="0" dy="3" stdDeviation="2.5" flood-color="#0b1a06" flood-opacity=".45"/></filter>
+    </defs>`;
+    return `<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">${defs}${out.join('')}</svg>`;
   }
   function wallLine(e, X, Y, cls, attrs = '') {
     const [a, b] = E.edgeEnds(e).map(E.P);
